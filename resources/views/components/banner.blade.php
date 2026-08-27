@@ -1,0 +1,1 @@
+<div class="banner" style="background-image: url({{ Voyager::image($banner) }})"></div>

@@ -1,0 +1,15 @@
+
+@font-face {
+  font-family: 'FedraArabic_beta';
+  src: url('FedraArabic_beta.eot?#iefix') format('embedded-opentype'),  url('FedraArabic_beta.woff') format('woff'), url('FedraArabic_beta.ttf')  format('truetype'), url('FedraArabic_beta.svg#FedraArabic_beta') format('svg');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'FedraAR-Demi';
+  src: url('FedraAR-Demi.eot?#iefix') format('embedded-opentype'),  url('FedraAR-Demi.otf')  format('opentype'),
+	     url('FedraAR-Demi.woff') format('woff'), url('FedraAR-Demi.ttf')  format('truetype'), url('FedraAR-Demi.svg#FedraAR-Demi') format('svg');
+  font-weight: normal;
+  font-style: normal;
+}

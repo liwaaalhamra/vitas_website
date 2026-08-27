@@ -1,0 +1,14 @@
+
+@font-face {
+  font-family: 'NotoNaskhArabic';
+  src: url('NotoNaskhArabic.eot?#iefix') format('embedded-opentype'),  url('NotoNaskhArabic.woff') format('woff'), url('NotoNaskhArabic.ttf')  format('truetype'), url('NotoNaskhArabic.svg#NotoNaskhArabic') format('svg');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'NotoNaskhArabic-Bold';
+  src: url('NotoNaskhArabic-Bold.eot?#iefix') format('embedded-opentype'),  url('NotoNaskhArabic-Bold.woff') format('woff'), url('NotoNaskhArabic-Bold.ttf')  format('truetype'), url('NotoNaskhArabic-Bold.svg#NotoNaskhArabic-Bold') format('svg');
+  font-weight: normal;
+  font-style: normal;
+}

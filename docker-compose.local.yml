@@ -1,0 +1,77 @@
+version: "3"
+services:
+  # PHP Service
+  app:
+    build:
+      context: .
+      dockerfile: DockerFile
+    image: vitas
+    container_name: vitas-app
+    restart: unless-stopped
+    tty: true
+    environment:
+      SERVICE_NAME: app
+      SERVICE_TAGS: dev
+    working_dir: /var/www/
+    volumes:
+      - ./:/var/www
+    networks:
+      - project_network
+
+  # Nginx Service
+  nginx:
+    image: nginx:alpine
+    container_name: vitas-nginx
+    restart: unless-stopped
+    tty: true
+    ports:
+      - "80:80"
+    volumes:
+      - ./:/var/www
+      - ./docker-compose/nginx/conf.d/:/etc/nginx/conf.d/
+    networks:
+      - project_network
+
+  # MySQL Service
+  db:
+    image: mysql:5.7
+    container_name: vitas-db
+    restart: unless-stopped
+    tty: true
+    ports:
+      - 3306:3306
+    environment:
+      MYSQL_DATABASE: $DB_DATABASE
+      MYSQL_ROOT_PASSWORD: $DB_PASSWORD
+      SERVICE_TAGS: dev
+      SERVICE_NAME: mysql
+    command: --disable-partition-engine-check
+    volumes:
+      - ./docker-compose/mysql:/docker-entrypoint-initdb.d
+      - backup:/var/lib/mysql
+    networks:
+      - project_network
+
+  # phpmyadmin
+  myadmin:
+    image: 'phpmyadmin:latest'
+    container_name: vitas-phpmyadmin
+    restart: unless-stopped
+    ports:
+      - 8080:80
+    environment:
+      PMA_HOST: db
+      MYSQL_ROOT_PASSWORD: $DB_PASSWORD
+    depends_on:
+      - db
+    networks:
+      - project_network
+
+# Docker Networks
+networks:
+  project_network:
+    driver: bridge
+
+# Volumes
+volumes:
+  backup:
