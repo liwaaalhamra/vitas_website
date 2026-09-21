@@ -39,6 +39,9 @@ Route::group(['prefix' => 'admin'], function () {
 		Route::post('/push-notification/send/single-push', 'Voyager\PushController@send_single_push')->name('send.single.push');
 		Route::get('/import-loyalty-points', 'Voyager\ImportLoyaltyPointController@index');
 		Route::post('/import-loyalty-points', 'Voyager\ImportLoyaltyPointController@import')->name('import.loyalty');
+
+		Route::get('/payments', 'Voyager\PaymentsAdminController@index')->name('admin.payments.index');
+		Route::get('/payments/{payment}', 'Voyager\PaymentsAdminController@show')->name('admin.payments.show');
 	});
 });
 
@@ -117,6 +120,15 @@ Route::group(['middleware' => ['locale', 'website'], 'prefix' => '{locale}'], fu
 
 	Route::get('/locate-us', 'LocateUsController@index')->name('locate-us');
 	Route::get('/faqs', 'FAQsController@index')->name('faqs');
+
+	/*
+	|--------------------------------------------------------------------------
+	| Areeba payment (pay a loan installment by loan number)
+	|--------------------------------------------------------------------------
+	*/
+	Route::get('/pay/loan', 'PaymentController@showLoanForm')->name('pay.loan.form');
+	Route::post('/pay/loan', 'PaymentController@lookupAndInitiate')->name('pay.loan.init');
+	Route::get('/pay/result', 'PaymentController@paymentReturn')->name('pay.result');
 
 });
 

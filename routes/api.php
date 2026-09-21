@@ -56,6 +56,13 @@ Route::group(['middleware' => 'locale', 'namespace' => 'Api'], function () {
     Route::post('/redeem', 'RedeemableItemController@redeem');
     Route::get('/e-wallet', 'EWaletController@index');
 
+    /*
+    |--------------------------------------------------------------------------
+    | Areeba payment gateway (loan installments)
+    |--------------------------------------------------------------------------
+    */
+    Route::post('/areeba/loan', 'AreebaPaymentController@initLoan');
+
 	/*
     |--------------------------------------------------------------------------
     | Middleware Routes
@@ -113,6 +120,15 @@ Route::group(['middleware' => 'locale', 'namespace' => 'Api'], function () {
 
 Route::get('zain-cash-callback', 'Api\VitasController@zain_cash_callback')->name('zain-cash-callback');
 Route::get('zain-cash-status', 'Api\VitasController@zain_cash_status')->name('zain-cash-status');
+
+/*
+|--------------------------------------------------------------------------
+| Areeba gateway – server-to-server + browser return (no locale header)
+|--------------------------------------------------------------------------
+*/
+Route::match(['get', 'post'], 'areeba/callback', 'Api\AreebaPaymentController@callback')->name('areeba.callback');
+Route::get('areeba/return', 'Api\AreebaPaymentController@paymentReturn')->name('areeba.return');
+Route::get('areeba/status/{reference}', 'Api\AreebaPaymentController@status')->name('areeba.status');
 
 
 Route::post('api-push', 'Api\ApiPushController@index');

@@ -95,6 +95,13 @@ return [
             'driver' => 'monolog',
             'handler' => NullHandler::class,
         ],
+
+        'payments' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/payments.log'),
+            'level' => 'debug',
+            'days' => env('PAYMENTS_LOG_DAYS', 30),
+        ],
     ],
 
 ];

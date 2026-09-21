@@ -18,3 +18,4 @@ locations/
 **.zip
 **.sql
 composer.phar
+docs/*

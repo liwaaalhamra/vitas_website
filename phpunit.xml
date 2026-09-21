@@ -28,8 +28,16 @@
         <server name="APP_ENV" value="testing"/>
         <server name="BCRYPT_ROUNDS" value="4"/>
         <server name="CACHE_DRIVER" value="array"/>
+        <server name="DB_CONNECTION" value="sqlite"/>
+        <server name="DB_DATABASE" value=":memory:"/>
         <server name="MAIL_DRIVER" value="array"/>
         <server name="QUEUE_CONNECTION" value="sync"/>
         <server name="SESSION_DRIVER" value="array"/>
+        <server name="AREEBA_BASE_URL" value="https://gateway.test/api/v3"/>
+        <server name="AREEBA_API_KEY" value="testkey"/>
+        <server name="AREEBA_API_USERNAME" value="apiuser"/>
+        <server name="AREEBA_API_PASSWORD" value="apipass"/>
+        <server name="AREEBA_LOYALTY_POINTS" value="150"/>
+        <server name="VITAS_PAYMENTS_INQUIRY_URL" value="https://core.test/CustomerDataInquiry"/>
     </php>
 </phpunit>
