@@ -30,4 +30,11 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
 
+    'firebase' => [
+        // service account JSON from the Firebase console, path relative to the project root
+        'credentials' => env('FIREBASE_CREDENTIALS') ? base_path(env('FIREBASE_CREDENTIALS')) : storage_path('app/firebase/service-account.json'),
+        // optional, defaults to project_id in the credentials file
+        'project_id' => env('FIREBASE_PROJECT_ID'),
+    ],
+
 ];
