@@ -51,6 +51,18 @@ class FirebaseService
      */
     public function send(array $info)
     {
+        $result = $this->dispatch($info);
+        Log::info('FCM push', [
+            'target' => !empty($info['topic']) ? 'topic:'.$info['topic'] : count((array) ($info['tokens'] ?? [])).' tokens',
+            'title' => $info['title'] ?? null,
+            'project' => $this->projectId,
+            'result' => $result,
+        ]);
+        return $result;
+    }
+
+    protected function dispatch(array $info)
+    {
         $tokens = !empty($info['tokens']) ? array_values(array_unique(array_filter($info['tokens']))) : [];
         if (empty($tokens) && empty($info['topic'])) {
             return ['error' => 'No device tokens provided'];
@@ -69,7 +81,7 @@ class FirebaseService
             $response = Http::withToken($accessToken)->post($url, ['message' => $message]);
             if ($response->successful()) {
                 $message = 'Push Sent Successfully to '.$info['topic'].' subscribers';
-                return ['status' => 'OK', 'message' => $message, 'debugger' => $message];
+                return ['status' => 'OK', 'message' => $message, 'debugger' => $message, 'fcm_id' => $response->json('name')];
             }
             return ['error' => ($response->json('error.message') ?: 'HTTP '.$response->status()).' - Failed to Send Push'];
         }
