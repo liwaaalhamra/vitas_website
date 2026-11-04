@@ -21,18 +21,22 @@ class PushController extends Controller
     public function set_user_push(Request $request) {
         if($access_token = parent::valid_access_token($request)) {
             if($user = parent::get_user_by_access_token($access_token)) {
-                if(empty($request['player_id'])){
-                    return parent::return_error('Player ID required!',400,'messages.missing_parameter');
+                // FCM registration token, "player_id" still accepted for older app builds
+                $fcm_token = $request['fcm_token'] ?: $request['player_id'];
+                if(empty($fcm_token)){
+                    return parent::return_error('FCM Token required!',400,'messages.missing_parameter');
                 }
-                if(!parent::validate_player_id($request->player_id)){
-                    return parent::return_error('Invalid Player ID',401,'messages.invalid_parameters');
+                if(!parent::validate_fcm_token($fcm_token)){
+                    return parent::return_error('Invalid FCM Token',401,'messages.invalid_parameters');
                 }
+                // a device token belongs to one user only (logout / login with another account)
+                UserPush::where('player_id', $fcm_token)->where('users_id', '<>', $user->id)->delete();
                 if($user_push = UserPush::whereUsersId($user->id)->first()){
-                    $user_push->player_id = $request['player_id'];
+                    $user_push->player_id = $fcm_token;
                     $user_push->save();
                 }else{
                     $user_push = UserPush::create([
-                        'player_id' => $request->get('player_id'),
+                        'player_id' => $fcm_token,
                         'users_id' => $user->id
                     ]);
                 }
@@ -105,17 +109,11 @@ class PushController extends Controller
         }
         if($employee = Users::where('employee_id','=',$request->employee_id)->where('is_blocked','=',0)->first()){
             if($user_push = UserPush::whereUsersId($employee->id)->first()){
-                $player_id = $user_push->player_id;
-                $contents = ["en" => trim($request->message)];
-                $headings = ["en" => trim($request->title)];
-
-                $info['contents'] = $contents;
-                $info['headings'] = $headings;
-                $info['player_ids'] = [$player_id];
-                if(isset($request->date)){
-                    $info['send_after'] = Carbon::createFromTimestamp($request->date)->format('Y-m-d H:i:s');
-                }
-                $result = parent::oneSignal($info);
+                $info['title'] = trim($request->title);
+                $info['body'] = trim($request->message);
+                $info['tokens'] = [$user_push->player_id];
+                // FCM has no scheduled delivery ("send_after"), the push is sent immediately
+                $result = parent::sendPush($info);
             }
         }
     }
