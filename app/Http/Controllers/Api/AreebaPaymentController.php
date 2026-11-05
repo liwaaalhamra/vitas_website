@@ -11,7 +11,8 @@ use Illuminate\Http\Request;
 
 /**
  * Mobile-app entry points for Areeba loan-installment payments. Mirrors the
- * auth + core-lookup flow of VitasController@zain_cash.
+ * auth + core-lookup flow of VitasController@zain_cash. The gateway return and
+ * webhook are shared with the website (PaymentReturnController).
  */
 class AreebaPaymentController extends Controller
 {
@@ -67,15 +68,16 @@ class AreebaPaymentController extends Controller
         }
 
         // 2. Read the outstanding installment.
-        $inquiry = $this->core->customerDataInquiry((string) $loanNumber);
+        $inquiry = $this->core->inquiry((string) $loanNumber);
 
-        if (!$this->core->hasPayableInstallment($inquiry)) {
+        if (!$inquiry['found']) {
             return parent::return_error('No payable installment for this loan', 459, 'No payable installment for this loan');
         }
 
-        // 3. Open the Areeba transaction.
+        // 3. Open the Areeba checkout session. Areeba sends the customer back to
+        //    /payment/return, which renders payment.app-result for the in-app browser.
         try {
-            $payment = $this->areeba->startLoanPayment($inquiry, 'app', (int) $user->id);
+            $payment = $this->areeba->startCheckout($inquiry['data'], 'app', (int) $user->id, app()->getLocale() === 'en' ? 'en' : 'ar');
         } catch (AreebaException $e) {
             return parent::return_error($e->getMessage(), 460, 'messages.payment_init_failed');
         }
@@ -85,47 +87,6 @@ class AreebaPaymentController extends Controller
             'reference'   => $payment->reference,
             'amount'      => $payment->amount,
             'currency'    => $payment->currency,
-        ]);
-    }
-
-    /**
-     * GET|POST /api/areeba/callback  (server-to-server notification from Areeba)
-     * Always answers "OK" so the gateway stops retrying; reconciliation happens
-     * against the status API.
-     */
-    public function callback(Request $request)
-    {
-        $this->areeba->handleCallback($request);
-
-        return response('OK', 200)->header('Content-Type', 'text/plain');
-    }
-
-    /**
-     * GET /api/areeba/return?reference=...   (browser lands here after paying)
-     * Renders a tiny page the in-app browser can detect; ?format=json for a
-     * machine-readable payload.
-     */
-    public function paymentReturn(Request $request)
-    {
-        $payment = Payment::where('reference', $request->query('reference'))->first();
-
-        if ($payment) {
-            $payment = $this->areeba->syncFromGateway($payment);
-        }
-
-        $status = $payment->status ?? 'unknown';
-
-        if ($request->query('format') === 'json') {
-            return response()->json([
-                'status'    => $status,
-                'paid'      => $status === 'paid',
-                'reference' => $payment->reference ?? null,
-            ]);
-        }
-
-        return response()->view('payment.app-result', [
-            'payment' => $payment,
-            'status'  => $status,
         ]);
     }
 
@@ -141,13 +102,14 @@ class AreebaPaymentController extends Controller
         }
 
         if (!$payment->isTerminal()) {
-            $payment = $this->areeba->syncFromGateway($payment);
+            $payment = $this->areeba->verify($payment, null, 'app_status');
         }
 
         return response()->json([
             'status'        => $payment->status,
             'paid'          => $payment->isPaid(),
             'status_reason' => $payment->status_reason,
+            'receipt_url'   => $payment->isPaid() ? \App\Http\Controllers\PaymentController::receiptUrl($payment) : null,
             'amount'        => $payment->amount,
             'currency'      => $payment->currency,
             'paid_at'       => optional($payment->paid_at)->toIso8601String(),

@@ -9,38 +9,39 @@ use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
- * Re-queries the gateway for payments that started but never reached a terminal
- * state (customer abandoned, callback lost, callback raced the browser return,
- * transient 3DS PENDING). Safe to run often — syncFromGateway is idempotent.
+ * Safety net for lost browser returns / webhooks (scheduled every 10 minutes):
+ *   - re-verifies open payments that have an Areeba transaction id
+ *   - closes checkout sessions abandoned for longer than AREEBA_SESSION_TTL_HOURS
+ *   - retries core banking pushes that failed (up to CORE_BANKING_PUSH_MAX_ATTEMPTS)
+ * Safe to run often: verify() and pushToBanking() are idempotent and row locked.
  */
 class ReconcilePayments extends Command
 {
-    protected $signature = 'payments:reconcile {--limit=200 : Max payments to process}';
+    protected $signature = 'payments:reconcile {--limit=200 : Max payments to process per step}';
 
-    protected $description = 'Reconcile pending/redirected gateway payments against the gateway status API';
+    protected $description = 'Reconcile open Areeba payments and retry failed core banking pushes';
 
     public function handle(AreebaPaymentService $areeba): int
     {
-        $payments = Payment::stale()
-            ->where('gateway', 'areeba')
-            ->orderBy('id')
-            ->limit((int) $this->option('limit'))
-            ->get();
-
-        $this->info("Reconciling {$payments->count()} payment(s)...");
-
+        $limit = (int) $this->option('limit');
+        $expireBefore = now()->subHours((int) config('services.areeba.session_ttl_hours', 24));
         $changed = 0;
 
-        foreach ($payments as $payment) {
+        $open = Payment::stale()->where('gateway', 'areeba')->orderBy('id')->limit($limit)->get();
+        $this->info("Checking {$open->count()} open payment(s)...");
+
+        foreach ($open as $payment) {
             $before = $payment->status;
 
             try {
-                $payment = $areeba->syncFromGateway($payment);
+                if ($payment->areeba_transaction_id) {
+                    $payment = $areeba->verify($payment, null, 'reconcile');
+                }
+                if (!$payment->isTerminal() && $payment->created_at <= $expireBefore) {
+                    $payment = $areeba->expire($payment);
+                }
             } catch (Throwable $e) {
-                Log::channel('payments')->error('payments.reconcile.error', [
-                    'reference' => $payment->reference,
-                    'error'     => $e->getMessage(),
-                ]);
+                Log::channel('payments')->error('payments.reconcile.error', ['reference' => $payment->reference, 'error' => $e->getMessage()]);
                 $this->warn("  {$payment->reference}: {$e->getMessage()}");
                 continue;
             }
@@ -51,33 +52,24 @@ class ReconcilePayments extends Command
             }
         }
 
-        // Retry posting paid installments back to the Vitas core.
-        $unconfirmed = Payment::needingCoreConfirmation()
-            ->where('gateway', 'areeba')
-            ->orderBy('id')
-            ->limit((int) $this->option('limit'))
-            ->get();
+        $pushed = 0;
+        $unpushed = Payment::needingBankingPush()->where('gateway', 'areeba')->orderBy('id')->limit($limit)->get();
 
-        $confirmed = 0;
-
-        foreach ($unconfirmed as $payment) {
+        foreach ($unpushed as $payment) {
             try {
-                $areeba->confirmToCore($payment);
+                $payment = $areeba->pushToBanking($payment, 'reconcile');
             } catch (Throwable $e) {
-                Log::channel('payments')->error('payments.reconcile.confirm_error', [
-                    'reference' => $payment->reference,
-                    'error'     => $e->getMessage(),
-                ]);
+                Log::channel('payments')->error('payments.reconcile.push_error', ['reference' => $payment->reference, 'error' => $e->getMessage()]);
                 continue;
             }
 
-            if ($payment->fresh()->confirmed_at) {
-                $confirmed++;
-                $this->line("  {$payment->reference}: confirmed to core");
+            if ($payment->banking_push_status === Payment::PUSH_SUCCESS) {
+                $pushed++;
+                $this->line("  {$payment->reference}: pushed to core banking");
             }
         }
 
-        $this->info("Done. {$changed} payment(s) changed status, {$confirmed} confirmed to core.");
+        $this->info("Done. {$changed} payment(s) changed status, {$pushed} pushed to core banking.");
 
         return self::SUCCESS;
     }

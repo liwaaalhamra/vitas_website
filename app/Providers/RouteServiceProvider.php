@@ -79,5 +79,17 @@ class RouteServiceProvider extends ServiceProvider
             return Limit::perMinute(300)   // ⬅ increase here
                 ->by($request->ip());
         });
+
+        // Anti-scraping on the public loan inquiry
+        RateLimiter::for('payment-inquiry', function ($request) {
+            return Limit::perMinute((int) env('PAYMENT_INQUIRY_RATE_LIMIT', 15))->by($request->ip());
+        });
+        RateLimiter::for('payment-checkout', function ($request) {
+            return Limit::perMinute(10)->by($request->ip());
+        });
+        // gateway return + webhook (each hit triggers a GetTransaction call)
+        RateLimiter::for('payment-webhook', function ($request) {
+            return Limit::perMinute(120)->by($request->ip());
+        });
     }
 }

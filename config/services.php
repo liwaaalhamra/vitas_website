@@ -32,61 +32,66 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Areeba Gateway (IXOPAY based, https://gateway.areebapayment.com)
+    | Areeba Payment Gateway (hosted checkout, https://payments-api.areeba.com)
     |--------------------------------------------------------------------------
     |
-    | Transaction API:  POST {base_url}/transaction/{api_key}/debit
-    | Status API:       GET  {base_url}/status/{api_key}/getByMerchantTransactionId/{ref}
-    | Auth:             HTTP Basic  ->  base64(username:password)
+    | A. Bearer token:      POST {base_url}/{env}/api/Authentication   (grant_type=password)
+    | B. Checkout session:  POST {base_url}/{env}/api/tokens/request    -> checkoutUrl
+    | C. Verification:      GET  {base_url}/{env}/api/v1/payments/GetTransaction/{txId}
     |
-    | NOTE: `username` / `password` are the API user created in the Areeba
-    | gateway portal (Settings -> Users / API). They are NOT necessarily the
-    | portal login. `webhook_secret` is optional; if set we verify the
-    | X-Signature header on the async notification but still fall back to the
-    | status API as the source of truth.
+    | Secrets (password, subscription key, webhook secret) may be stored
+    | encrypted: run `php artisan secrets:encrypt` and paste the "enc:..." value.
     |
     */
     'areeba' => [
-        'base_url'       => env('AREEBA_BASE_URL', 'https://gateway.areebapayment.com/api/v3'),
-        'api_key'        => env('AREEBA_API_KEY'),
-        'username'       => env('AREEBA_API_USERNAME'),
-        'password'       => env('AREEBA_API_PASSWORD'),
-        'webhook_secret' => env('AREEBA_WEBHOOK_SECRET'),
-        'timeout'        => (int) env('AREEBA_TIMEOUT', 30),
-        'loyalty_points' => (float) env('AREEBA_LOYALTY_POINTS', 150),
-        'company_name'   => env('AREEBA_COMPANY_NAME', 'Vitas Iraq'),
+        'base_url'            => env('AREEBA_BASE_URL', 'https://payments-api.areeba.com'),
+        'env_path'            => env('AREEBA_ENV_PATH', 'prod'),
+        'client_id'           => env('AREEBA_CLIENT_ID', '2503'),
+        'product_id'          => (int) env('AREEBA_PRODUCT_ID', 93000533),
+        'username'            => env('AREEBA_API_USERNAME', 'Vitas PGW'),
+        'password'            => env('AREEBA_API_PASSWORD'),
+        'subscription_key'    => env('AREEBA_SUBSCRIPTION_KEY'),
+        'subscription_header' => env('AREEBA_SUBSCRIPTION_HEADER', 'Ocp-Apim-Subscription-Key'),
+        'currency'            => env('AREEBA_CURRENCY', 'IQD'),
+        'token_type_id'       => (int) env('AREEBA_TOKEN_TYPE_ID', 4),
+        'tax_included'        => env('AREEBA_TAX_INCLUDED', 'True'),
+        // Parameter key used to pass our return URL in the checkout session.
+        // Leave empty if the return URL is configured on the Areeba portal instead.
+        'return_url_param'    => env('AREEBA_RETURN_URL_PARAM'),
+        // Server-to-server notifications (/payment/webhook)
+        'webhook_secret'      => env('AREEBA_WEBHOOK_SECRET'),
+        'webhook_header'      => env('AREEBA_WEBHOOK_SIGNATURE_HEADER', 'X-Signature'),
+        'webhook_algo'        => env('AREEBA_WEBHOOK_ALGO', 'sha256'),
+        'timeout'             => (int) env('AREEBA_TIMEOUT', 30),
+        // abandoned checkout sessions are closed as cancelled after this many hours
+        'session_ttl_hours'   => (int) env('AREEBA_SESSION_TTL_HOURS', 24),
+        'loyalty_points'      => (float) env('AREEBA_LOYALTY_POINTS', 150),
     ],
 
     /*
     |--------------------------------------------------------------------------
-    | Vitas core "CustomerDataInquiry" (web-abacus)
+    | Vitas Core Banking (web-abacus)
     |--------------------------------------------------------------------------
     |
-    | Same endpoint + credentials the legacy ZainCash flow uses to read the
-    | outstanding installment for a loan number.
+    | Inquiry:  POST {base_url}/api/VitasPayments/CustomerDataInquiryByLoanNumber
+    | Push:     POST {base_url}/api/VitasPayments/CustomerPaymentDetails
+    |
+    | Inquiry and payment push use separate credentials. Passwords may be stored
+    | encrypted ("enc:..." from `php artisan secrets:encrypt`).
     |
     */
     'vitas_core' => [
-        'inquiry_url' => env('VITAS_PAYMENTS_INQUIRY_URL', 'https://go.web-abacus.com/api/VitasPayments/CustomerDataInquiry'),
-
-        // web-abacus API credentials. CustomerDataInquiry is confirmed to require
-        // the APP_USERNAME / APP_PASSWORD pair — the ZAIN_CASH_* pair is rejected
-        // by it ("Invalid user or password").
-        'username'    => env('VITAS_CORE_USERNAME', env('APP_USERNAME')),
-        'password'    => env('VITAS_CORE_PASSWORD', env('APP_PASSWORD')),
-
-        // After a paid Areeba installment we post the payment back to the core so
-        // the loan system marks it settled — same as the legacy ZainCash
-        // CustomerPaymentDetails call. Point this at an Areeba-specific endpoint
-        // once the Vitas backend provides one; the ZainCash path is the proven
-        // default. Set VITAS_CORE_CONFIRM_ENABLED=false to only record locally.
-        'confirm_enabled'  => filter_var(env('VITAS_CORE_CONFIRM_ENABLED', true), FILTER_VALIDATE_BOOL),
-        'confirm_url'      => env('VITAS_PAYMENTS_CONFIRM_URL', 'https://go.web-abacus.com/api/ZainCash/CustomerPaymentDetails'),
-        // The legacy ZainCash callback used the ZAIN_CASH_* pair for the
-        // post-back; override here if CustomerPaymentDetails needs different
-        // credentials than CustomerDataInquiry.
-        'confirm_username' => env('VITAS_CORE_CONFIRM_USERNAME', env('VITAS_CORE_USERNAME', env('APP_USERNAME'))),
-        'confirm_password' => env('VITAS_CORE_CONFIRM_PASSWORD', env('VITAS_CORE_PASSWORD', env('APP_PASSWORD'))),
+        'base_url'          => env('CORE_BANKING_API_BASE_URL', 'https://go.web-abacus.com'),
+        'inquiry_path'      => env('CORE_BANKING_INQUIRY_PATH', '/api/VitasPayments/CustomerDataInquiryByLoanNumber'),
+        'payment_path'      => env('CORE_BANKING_PAYMENT_PATH', '/api/VitasPayments/CustomerPaymentDetails'),
+        'inquiry_username'  => env('CORE_BANKING_INQUIRY_USERNAME', env('VITAS_CORE_USERNAME', env('APP_USERNAME'))),
+        'inquiry_password'  => env('CORE_BANKING_INQUIRY_PASSWORD', env('VITAS_CORE_PASSWORD', env('APP_PASSWORD'))),
+        'payment_username'  => env('CORE_BANKING_PAYMENT_USERNAME', env('VITAS_CORE_CONFIRM_USERNAME')),
+        'payment_password'  => env('CORE_BANKING_PAYMENT_PASSWORD', env('VITAS_CORE_CONFIRM_PASSWORD')),
+        'source_currency_id'=> (int) env('CORE_BANKING_SOURCE_CURRENCY_ID', 3),
+        'push_enabled'      => filter_var(env('CORE_BANKING_PUSH_ENABLED', true), FILTER_VALIDATE_BOOL),
+        'push_max_attempts' => (int) env('CORE_BANKING_PUSH_MAX_ATTEMPTS', 10),
+        'timeout'           => (int) env('CORE_BANKING_TIMEOUT', 30),
     ],
 
     'firebase' => [

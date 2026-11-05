@@ -5,7 +5,10 @@ namespace App\Services\Areeba;
 use App\Models\Api\AppUsers;
 use App\Models\Api\AppUsersPoint;
 use App\Models\Payment;
+use App\Services\ApiLogger;
 use App\Services\VitasCoreClient;
+use App\Support\Payload;
+use App\Support\Secret;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -13,13 +16,22 @@ use Illuminate\Support\Str;
 use Throwable;
 
 /**
- * Orchestrates an Areeba loan-installment payment: builds the local Payment
- * record, opens the gateway transaction, and reconciles the outcome from the
- * gateway's status API (which is treated as the single source of truth — the
- * async callback is only a "wake up and re-check" ping).
+ * Orchestrates an Areeba hosted-checkout loan payment:
+ *
+ *   startCheckout()  initiated -> session_created (customer sent to checkoutUrl)
+ *   verify()         GetTransaction is the single source of truth -> paid | failed | cancelled
+ *   pushToBanking()  paid -> CustomerPaymentDetails on the core banking system
+ *
+ * verify() and pushToBanking() run under a row lock (SELECT ... FOR UPDATE) so the
+ * browser return, the webhook and the reconcile command can race safely without
+ * double-marking or double-posting a payment.
  */
 class AreebaPaymentService
 {
+    const PAID = ['approved', 'success', 'successful', 'succeeded', 'paid', 'captured', 'completed', 'settled'];
+    const FAILED = ['declined', 'failed', 'failure', 'error', 'rejected', 'denied'];
+    const CANCELLED = ['cancelled', 'canceled', 'voided', 'void', 'expired', 'aborted'];
+
     public function __construct(
         private AreebaClient $client,
         private VitasCoreClient $core
@@ -27,206 +39,247 @@ class AreebaPaymentService
     }
 
     /**
-     * Create a Payment from a CustomerDataInquiry result and open the Areeba
-     * transaction. On success the returned Payment has ->redirect_url set.
-     *
-     * @param  array        $inquiry  Raw CustomerDataInquiry response.
-     * @param  string       $channel  'app' | 'web'
-     * @param  int|null     $appUserId  app_users.id when initiated from the mobile app.
+     * Create the local order from a normalized core inquiry and open the
+     * Areeba checkout session. The returned Payment has ->redirect_url set.
      *
      * @throws AreebaException
      */
-    public function startLoanPayment(array $inquiry, string $channel, ?int $appUserId = null): Payment
+    public function startCheckout(array $inquiry, string $channel, ?int $appUserId = null, ?string $locale = null): Payment
     {
-        [$amount, $currency] = $this->resolveAmount($inquiry);
-
         $payment = Payment::create([
             'reference'          => $this->newReference(),
             'channel'            => $channel,
+            'locale'             => $locale ?: app()->getLocale(),
             'gateway'            => 'areeba',
             'purpose'            => 'loan_installment',
-            'status'             => 'pending',
+            'status'             => 'initiated',
             'app_user_id'        => $appUserId,
-            'client_id'          => $inquiry['ClientID'] ?? null,
-            'loan_number'        => $inquiry['LoanNumber'] ?? null,
-            'branch_code'        => $inquiry['BranchCode'] ?? null,
-            'installment_number' => $inquiry['PaymentNumber'] ?? null,
-            'phone_number'       => $inquiry['PhoneNumber'] ?? null,
-            'customer_name'      => $inquiry['CustomerName'] ?? ($inquiry['ClientName'] ?? null),
-            'amount'             => $amount,
-            'currency'           => $currency,
-            'amount_usd'         => $inquiry['TotalPaymentDueUSD'] ?? null,
-            'amount_iqd'         => $inquiry['TotalPaymentDueIQD'] ?? null,
-            'exchange_rate'      => $inquiry['ExchangeRate'] ?? null,
-            'meta'               => ['inquiry' => $inquiry],
+            'client_id'          => $inquiry['client_id'] ?? null,
+            'loan_number'        => $inquiry['loan_number'],
+            'branch_code'        => $inquiry['branch_code'] ?? null,
+            'branch_name'        => $inquiry['branch_name'] ?? null,
+            'loan_product'       => $inquiry['loan_product'] ?? null,
+            'due_date'           => $inquiry['due_date'] ?? null,
+            'installment_number' => $inquiry['installment_number'] ?? null,
+            'phone_number'       => $inquiry['phone_number'] ?? null,
+            'customer_name'      => $inquiry['customer_name'] ?? null,
+            'amount'             => $inquiry['amount_iqd'],
+            'amount_iqd'         => $inquiry['amount_iqd'],
+            'currency'           => config('services.areeba.currency', 'IQD'),
+            'meta'               => ['inquiry' => $inquiry['raw'] ?? null],
         ]);
-
-        $payload = $this->buildDebitPayload($payment);
-        $payment->logEvent('init_request', ['context' => $this->redactPayload($payload)]);
+        $payment->logEvent('initiated', ['message' => $payment->amount.' '.$payment->currency.' for loan '.$payment->loan_number]);
 
         try {
-            $response = $this->client->debit($payload);
+            $session = $this->client->createCheckoutSession($payment, route('payment.return', ['ref' => $payment->reference]));
         } catch (AreebaException $e) {
             $payment->logEvent('error', ['message' => $e->getMessage(), 'context' => $e->context]);
-            $payment->markStatus('error', Str::limit($e->getMessage(), 240));
+            $payment->markStatus('failed', Str::limit('checkout session: '.$e->getMessage(), 240));
             throw $e;
         }
 
-        $payment->logEvent('init_response', [
-            'http_status' => $response['__httpStatus'] ?? null,
-            'context'     => $response,
-        ]);
-
-        $ok = ($response['success'] ?? false) === true;
-        $redirectUrl = $response['redirectUrl'] ?? null;
-
-        if (!$ok || !$redirectUrl) {
-            $reason = $this->extractError($response) ?: 'Gateway did not return a redirect URL';
-            $payment->markStatus('error', Str::limit($reason, 240));
-            throw AreebaException::make('Areeba init failed: ' . $reason, ['response' => $response]);
-        }
-
+        unset($session['raw']['__httpStatus']);
+        $payment->storeAreebaResponse('session', $session['raw']);
         $payment->forceFill([
-            'gateway_uuid'        => $response['uuid'] ?? null,
-            'gateway_purchase_id' => $response['purchaseId'] ?? null,
-            'payment_method'      => $response['paymentMethod'] ?? null,
-            'redirect_url'        => $redirectUrl,
+            'redirect_url'          => $session['checkout_url'],
+            'areeba_transaction_id' => $this->transactionIdFrom($session['raw']),
         ])->save();
-
-        $payment->markStatus('redirected');
-        $payment->logEvent('redirect', ['message' => $redirectUrl]);
+        $payment->markStatus('session_created');
+        $payment->logEvent('session_created', ['message' => $session['checkout_url']]);
 
         return $payment->refresh();
     }
 
     /**
-     * Pull the authoritative status for a Payment from Areeba and apply it.
-     * Idempotent: safe to call from the callback, the browser return, the
-     * status poll and the reconcile command.
+     * Verify the payment against Areeba GetTransaction and apply the result.
+     * Idempotent and safe to call concurrently.
+     *
+     * @param  string|null  $transactionId  Areeba transaction id reported by the return / webhook
+     *                                       (only ever used to query Areeba, never trusted as a result)
      */
-    public function syncFromGateway(Payment $payment): Payment
+    public function verify(Payment $payment, ?string $transactionId = null, string $source = 'manual'): Payment
     {
-        if ($payment->isTerminal()) {
-            return $payment;
-        }
+        $payment = DB::transaction(function () use ($payment, $transactionId, $source) {
+            /** @var Payment $locked */
+            $locked = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
 
-        $payment->logEvent('status_request', ['message' => $payment->reference]);
-
-        try {
-            $response = $this->client->statusByMerchantTransactionId($payment->reference);
-        } catch (AreebaException $e) {
-            $payment->logEvent('error', ['message' => 'status query failed: ' . $e->getMessage()]);
-
-            return $payment;
-        }
-
-        $payment->logEvent('status_response', [
-            'http_status' => $response['__httpStatus'] ?? null,
-            'context'     => $response,
-        ]);
-
-        $payment->forceFill([
-            'meta' => array_merge($payment->meta ?? [], ['last_status' => $response]),
-        ])->save();
-
-        $status = strtoupper((string) ($response['transactionStatus'] ?? ''));
-
-        // No status yet (e.g. "transaction not found" because the customer never
-        // started). Leave the Payment open for a later retry / ageing out.
-        if ($status === '' && ($response['success'] ?? null) === false) {
-            $payment->logEvent('error', ['message' => $this->extractError($response) ?: 'no transactionStatus']);
-
-            return $payment;
-        }
-
-        if (in_array($status, ['SUCCESS', 'OK'], true)) {
-            if (!$this->amountsMatch($payment, $response)) {
-                $payment->markStatus('mismatch', sprintf(
-                    'gateway reported %s %s, expected %s %s',
-                    $response['amount'] ?? '?', $response['currency'] ?? '?',
-                    $payment->amount, $payment->currency
-                ));
-                $payment->logEvent('error', ['message' => 'amount/currency mismatch', 'context' => $response]);
-
-                return $payment->refresh();
+            if ($locked->isPaid()) {
+                return $locked;
             }
 
-            $payment->forceFill([
-                'gateway_uuid'   => $response['uuid'] ?? $payment->gateway_uuid,
-                'payment_method' => $response['paymentMethod'] ?? $payment->payment_method,
+            $transactionId = $transactionId ?: $locked->areeba_transaction_id;
+            if (!$transactionId) {
+                return $locked;
+            }
+
+            // A transaction id belongs to exactly one order
+            if (Payment::where('areeba_transaction_id', $transactionId)->whereKeyNot($locked->id)->exists()) {
+                $locked->logEvent('alert', ['message' => "{$source}: transaction {$transactionId} already belongs to another payment"]);
+
+                return $locked;
+            }
+
+            try {
+                $transaction = $this->client->getTransaction($transactionId, $locked->id);
+            } catch (AreebaException $e) {
+                $locked->logEvent('error', ['message' => "{$source}: GetTransaction failed: ".$e->getMessage()]);
+
+                return $locked;
+            }
+
+            unset($transaction['__httpStatus']);
+            $locked->areeba_transaction_id = $transactionId;
+            $locked->storeAreebaResponse('transaction', $transaction);
+            $this->applyTransaction($locked, $transaction, $source);
+
+            return $locked->refresh();
+        });
+
+        if ($payment->isPaid() && $payment->banking_push_status === Payment::PUSH_PENDING) {
+            $this->awardLoyaltyPoints($payment);
+            $payment = $this->pushToBanking($payment);
+        }
+
+        return $payment;
+    }
+
+    /**
+     * Post a paid payment to the core banking system. Row locked so two
+     * concurrent callers can never push the same payment twice.
+     */
+    public function pushToBanking(Payment $payment, ?string $triggeredBy = null): Payment
+    {
+        if (!config('services.vitas_core.push_enabled', true)) {
+            $payment->logEvent('banking_push', ['message' => 'skipped (CORE_BANKING_PUSH_ENABLED=false)']);
+
+            return $payment;
+        }
+
+        return DB::transaction(function () use ($payment, $triggeredBy) {
+            /** @var Payment $locked */
+            $locked = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
+
+            if (!$locked->isPaid() || $locked->banking_push_status === Payment::PUSH_SUCCESS) {
+                return $locked;
+            }
+
+            $locked->forceFill([
+                'banking_push_attempts'   => (int) $locked->banking_push_attempts + 1,
+                'banking_last_attempt_at' => now(),
             ])->save();
 
-            $becamePaid = !$payment->isPaid();
-            $payment->markStatus('paid');
-
-            if ($becamePaid) {
-                $this->awardLoyaltyPoints($payment->refresh());
-                $this->confirmToCore($payment->refresh());
+            try {
+                $result = $this->core->pushPayment($locked);
+            } catch (Throwable $e) {
+                $result = ['ok' => false, 'http_status' => null, 'status_code' => null, 'action_status' => Str::limit($e->getMessage(), 240), 'body' => null];
             }
 
-            return $payment->refresh();
+            $locked->forceFill([
+                'banking_push_status'   => $result['ok'] ? Payment::PUSH_SUCCESS : Payment::PUSH_FAILED,
+                'banking_status_code'   => $result['status_code'] ?? ($result['http_status'] ? 'HTTP '.$result['http_status'] : null),
+                'banking_action_status' => $result['action_status'] !== null ? Str::limit((string) $result['action_status'], 490) : null,
+                'banking_response_json' => is_array($result['body']) ? $result['body'] : ['raw' => $result['body']],
+                'banking_pushed_at'     => $result['ok'] ? now() : $locked->banking_pushed_at,
+            ])->save();
+
+            $locked->logEvent('banking_push', [
+                'http_status' => $result['http_status'],
+                'message'     => ($result['ok'] ? 'success' : 'failed').' (attempt '.$locked->banking_push_attempts
+                    .($triggeredBy ? ', by '.$triggeredBy : '').')'.($result['action_status'] ? ': '.$result['action_status'] : ''),
+            ]);
+
+            return $locked->refresh();
+        });
+    }
+
+    /**
+     * Server-to-server notification (/payment/webhook). Rejected unless the
+     * HMAC signature matches; the body only tells us which payment to
+     * re-verify, the outcome always comes from GetTransaction.
+     *
+     * @return array{0: int, 1: string}  [http status, body]
+     */
+    public function handleWebhook(Request $request): array
+    {
+        if (!$this->validSignature($request)) {
+            Log::channel('payments')->warning('areeba.webhook.invalid_signature', [
+                'ip'     => $request->ip(),
+                'header' => $request->header(config('services.areeba.webhook_header')),
+                'body'   => Str::limit($request->getContent(), 2000),
+            ]);
+
+            return [401, 'invalid signature'];
         }
 
-        if ($status === 'PENDING' || $status === 'NEW') {
-            $payment->markStatus('pending', 'gateway PENDING');
+        $body = json_decode($request->getContent(), true);
+        $body = is_array($body) ? $body : $request->all();
 
-            return $payment->refresh();
+        $reference = Payload::find($body, ['pt', 'merchantReference', 'orderReference', 'orderId', 'reference']);
+        $transactionId = $this->transactionIdFrom($body);
+
+        $payment = null;
+        if ($reference) {
+            $payment = Payment::where('reference', (string) $reference)->first();
+        }
+        if (!$payment && $transactionId) {
+            $payment = Payment::where('areeba_transaction_id', (string) $transactionId)->first();
         }
 
-        // ERROR / DECLINED / EXPIRED / CANCELLED / anything else -> failed.
-        $mapped = in_array($status, ['DECLINED', 'CANCELLED', 'EXPIRED'], true)
-            ? strtolower($status)
-            : 'failed';
+        if (!$payment) {
+            Log::channel('payments')->warning('areeba.webhook.unknown_payment', ['body' => $body]);
 
-        $payment->markStatus($mapped, $this->extractError($response) ?: ('gateway ' . ($status ?: 'ERROR')));
+            return [200, 'unknown payment'];
+        }
+
+        $payment->logEvent('webhook', ['context' => ApiLogger::redact($body)]);
+        $payment->storeAreebaResponse('webhook', $body);
+        $this->verify($payment, $transactionId ? (string) $transactionId : null, 'webhook');
+
+        return [200, 'OK'];
+    }
+
+    /**
+     * Customer browser returning from the hosted checkout.
+     */
+    public function handleReturn(Payment $payment, Request $request): Payment
+    {
+        $params = $request->except(['_token']);
+        $payment->logEvent('return', ['context' => $params]);
+        $payment->storeAreebaResponse('return', $params);
+
+        $transactionId = $this->transactionIdFrom($params);
+        $payment = $this->verify($payment, $transactionId ? (string) $transactionId : null, 'return');
+
+        // No transaction to verify and the customer explicitly cancelled at the gateway.
+        // Still overridable by a later verified "paid" (see Payment::markStatus).
+        $outcome = strtolower((string) Payload::find($params, ['status', 'outcome', 'result']));
+        if (!$payment->isTerminal() && !$payment->areeba_transaction_id && in_array($outcome, self::CANCELLED, true)) {
+            $payment->markStatus('cancelled', 'cancelled by customer at checkout');
+            $payment->logEvent('cancelled', ['message' => 'customer cancelled at checkout']);
+        }
 
         return $payment->refresh();
     }
 
     /**
-     * Handle the async server-to-server notification. The body is untrusted:
-     * we log it, optionally verify X-Signature, then reconcile from the status
-     * API regardless.
+     * Close a checkout session that was never completed.
      */
-    public function handleCallback(Request $request): ?Payment
+    public function expire(Payment $payment): Payment
     {
-        $reference = $request->input('merchantTransactionId')
-            ?? $request->input('reference')
-            ?? $request->query('reference');
-
-        $payment = $reference ? Payment::where('reference', $reference)->first() : null;
-
-        if (!$payment) {
-            Log::channel('payments')->warning('areeba.callback.unknown_reference', [
-                'reference' => $reference,
-                'body'      => $request->all(),
-            ]);
-
-            return null;
-        }
-
-        $payment->logEvent('callback', [
-            'context' => [
-                'headers' => ['x-signature' => $request->header('X-Signature')],
-                'body'    => $request->all(),
-                'query'   => $request->query(),
-            ],
-        ]);
-
-        $secret = config('services.areeba.webhook_secret');
-        if ($secret) {
-            $expected = base64_encode(hash_hmac('sha512', $request->getContent(), $secret, true));
-            if (!hash_equals($expected, (string) $request->header('X-Signature'))) {
-                $payment->logEvent('error', ['message' => 'callback X-Signature mismatch']);
+        return DB::transaction(function () use ($payment) {
+            $locked = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            if (!$locked->isTerminal()) {
+                $locked->markStatus('cancelled', 'checkout session expired');
+                $locked->logEvent('cancelled', ['message' => 'checkout session expired without a transaction']);
             }
-        }
 
-        return $this->syncFromGateway($payment);
+            return $locked->refresh();
+        });
     }
 
     /**
-     * Mirror of the legacy ZainCash loyalty award. Idempotent, app channel only,
-     * and only when a positive point value is configured.
+     * Loyalty points for app payments (same as the legacy ZainCash flow).
+     * Idempotent, only when a positive point value is configured.
      */
     public function awardLoyaltyPoints(Payment $payment): void
     {
@@ -236,14 +289,14 @@ class AreebaPaymentService
             return;
         }
 
-        DB::transaction(function () use ($payment, $points) {
+        $awarded = DB::transaction(function () use ($payment, $points) {
             $already = AppUsersPoint::where('meta_name', 'areeba')
                 ->where('meta_value', $payment->reference)
                 ->lockForUpdate()
                 ->exists();
 
             if ($already) {
-                return;
+                return false;
             }
 
             AppUsersPoint::create([
@@ -259,156 +312,95 @@ class AreebaPaymentService
                 $user->total_points = (int) $user->total_points + (int) $points;
                 $user->save();
             }
+
+            return true;
         });
 
-        $payment->logEvent('points_awarded', ['message' => $points . ' points -> client ' . $payment->client_id]);
-    }
-
-    /**
-     * Post the settled installment back to the Vitas core (loan system), the
-     * same step the legacy ZainCash flow performed. Never lets a confirmation
-     * failure break the "paid" transition — the reconcile command retries.
-     */
-    public function confirmToCore(Payment $payment): void
-    {
-        if ($payment->confirmed_at || !$payment->isPaid()) {
-            return;
-        }
-
-        if (!config('services.vitas_core.confirm_enabled', true)) {
-            $payment->logEvent('core_confirm_request', ['message' => 'skipped (confirm disabled)']);
-
-            return;
-        }
-
-        $payment->forceFill(['confirm_attempts' => (int) $payment->confirm_attempts + 1])->save();
-        $payment->logEvent('core_confirm_request', ['message' => 'attempt ' . $payment->confirm_attempts]);
-
-        try {
-            $ok = $this->core->confirmPayment($payment);
-        } catch (Throwable $e) {
-            $payment->forceFill(['confirm_error' => Str::limit($e->getMessage(), 240)])->save();
-            $payment->logEvent('error', ['message' => 'core confirmation threw: ' . $e->getMessage()]);
-
-            return;
-        }
-
-        if ($ok) {
-            $payment->forceFill(['confirmed_at' => now(), 'confirm_error' => null])->save();
-            $payment->logEvent('core_confirm_response', ['message' => 'confirmed by core']);
-        } else {
-            $payment->forceFill(['confirm_error' => 'core did not acknowledge (attempt ' . $payment->confirm_attempts . ')'])->save();
-            $payment->logEvent('error', ['message' => 'core confirmation not acknowledged']);
+        if ($awarded) {
+            $payment->logEvent('points_awarded', ['message' => $points.' points -> client '.$payment->client_id]);
         }
     }
 
     // ------------------------------------------------------------------ helpers
 
-    private function buildDebitPayload(Payment $payment): array
+    private function applyTransaction(Payment $payment, array $transaction, string $source): void
     {
-        [$first, $last] = $this->splitName($payment->customer_name);
+        $reported = Payload::find($transaction, ['pt', 'merchantReference', 'orderReference', 'orderId']);
+        if ($reported !== null && (string) $reported !== $payment->reference) {
+            $payment->logEvent('alert', ['message' => "{$source}: transaction belongs to order {$reported}, not {$payment->reference}"]);
 
-        return array_filter([
-            'merchantTransactionId' => $payment->reference,
-            'amount'                => number_format((float) $payment->amount, 2, '.', ''),
-            'currency'              => $payment->currency,
-            'successUrl'            => $this->returnUrl($payment, 'success'),
-            'cancelUrl'             => $this->returnUrl($payment, 'cancel'),
-            'errorUrl'              => $this->returnUrl($payment, 'error'),
-            'callbackUrl'           => route('areeba.callback'),
-            'customer'              => array_filter([
-                'firstName' => $first,
-                'lastName'  => $last,
-                'company'   => config('services.areeba.company_name'),
-                'ipAddress' => request()->ip(),
-            ]),
-            'language'              => app()->getLocale() === 'ar' ? 'ar' : 'en',
-        ], fn ($v) => $v !== null && $v !== '' && $v !== []);
-    }
-
-    private function returnUrl(Payment $payment, string $outcome): string
-    {
-        if ($payment->channel === 'web') {
-            return route('pay.result', [
-                'locale'    => app()->getLocale(),
-                'reference' => $payment->reference,
-                'outcome'   => $outcome,
-            ]);
+            return;
         }
 
-        return route('areeba.return', [
-            'reference' => $payment->reference,
-            'outcome'   => $outcome,
-        ]);
-    }
+        $status = strtolower(trim((string) Payload::find($transaction, ['transactionStatus', 'paymentStatus', 'status', 'statusName', 'state', 'result'])));
+        $payment->logEvent('verified', ['message' => "{$source}: Areeba status '{$status}'"]);
 
-    /**
-     * Currency follows the loan currency; both amounts are still stored on the
-     * Payment for reporting.
-     *
-     * @return array{0: string, 1: string}  [amount, currency]
-     */
-    private function resolveAmount(array $inquiry): array
-    {
-        $loanCurrency = strtoupper((string) ($inquiry['LoanCurrency'] ?? 'USD'));
+        if (in_array($status, self::PAID, true)) {
+            $mismatch = $this->amountMismatch($payment, $transaction);
+            if ($mismatch) {
+                $payment->markStatus('failed', 'amount mismatch: '.$mismatch);
+                $payment->logEvent('alert', ['message' => 'paid with amount mismatch, NOT posted to core banking: '.$mismatch]);
 
-        if ($loanCurrency === 'IQD') {
-            $amount = $inquiry['TotalPaymentDueIQD'] ?? $inquiry['PaymentDueIQD'] ?? 0;
+                return;
+            }
+            $payment->markStatus('paid');
 
-            return [number_format((float) $amount, 2, '.', ''), 'IQD'];
+            return;
         }
 
-        $amount = $inquiry['TotalPaymentDueUSD'] ?? $inquiry['PaymentDueUSD'] ?? 0;
-
-        return [number_format((float) $amount, 2, '.', ''), 'USD'];
+        if (in_array($status, self::FAILED, true)) {
+            $payment->markStatus('failed', Str::limit('Areeba: '.(AreebaClient::errorMessage($transaction) ?: $status), 240));
+        } elseif (in_array($status, self::CANCELLED, true)) {
+            $payment->markStatus('cancelled', 'Areeba: '.$status);
+        }
+        // anything else (pending, processing, ...) stays open for a later check
     }
 
-    private function amountsMatch(Payment $payment, array $response): bool
+    private function amountMismatch(Payment $payment, array $transaction): ?string
     {
-        $sameCurrency = strtoupper((string) ($response['currency'] ?? '')) === strtoupper($payment->currency);
-        $sameAmount = abs((float) ($response['amount'] ?? 0) - (float) $payment->amount) < 0.01;
+        $amount = Payload::find($transaction, ['chargeAmount', 'amount', 'totalAmount', 'transactionAmount']);
+        $currency = Payload::find($transaction, ['currency', 'currencyCode']);
 
-        return $sameCurrency && $sameAmount;
-    }
-
-    private function extractError(array $response): ?string
-    {
-        if (!empty($response['errors'][0]['message'])) {
-            return $response['errors'][0]['message'];
+        if ($amount !== null && abs((float) $amount - (float) $payment->amount) >= 0.01) {
+            return "gateway {$amount}, expected {$payment->amount}";
         }
-        if (!empty($response['errorMessage'])) {
-            return $response['errorMessage'];
-        }
-        if (!empty($response['message'])) {
-            return $response['message'];
+        if ($currency !== null && !is_numeric($currency) && strtoupper((string) $currency) !== strtoupper($payment->currency)) {
+            return "gateway currency {$currency}, expected {$payment->currency}";
         }
 
         return null;
     }
 
-    private function splitName(?string $name): array
+    private function validSignature(Request $request): bool
     {
-        $name = trim((string) $name);
-        if ($name === '') {
-            return ['Vitas', 'Customer'];
+        $secret = Secret::reveal(config('services.areeba.webhook_secret'));
+        if (!$secret) {
+            Log::channel('payments')->error('areeba.webhook.secret_not_configured');
+
+            return false;
         }
 
-        $parts = preg_split('/\s+/', $name, 2);
+        $given = trim((string) $request->header(config('services.areeba.webhook_header', 'X-Signature')));
+        $given = preg_replace('/^[a-z0-9]+=/i', '', $given); // "sha256=..." form
+        if ($given === '') {
+            return false;
+        }
 
-        return [$parts[0], $parts[1] ?? $parts[0]];
+        $algo = config('services.areeba.webhook_algo', 'sha256');
+        $raw = hash_hmac($algo, $request->getContent(), $secret, true);
+
+        return hash_equals(bin2hex($raw), strtolower($given)) || hash_equals(base64_encode($raw), $given);
+    }
+
+    private function transactionIdFrom(array $data): ?string
+    {
+        $id = Payload::find($data, ['transactionId', 'txId', 'transaction_id', 'TransactionID', 'tranId']);
+
+        return $id !== null ? (string) $id : null;
     }
 
     private function newReference(): string
     {
-        return 'VITAS-' . now()->format('ymd') . '-' . strtoupper(Str::random(12));
-    }
-
-    private function redactPayload(array $payload): array
-    {
-        if (isset($payload['customer'])) {
-            $payload['customer'] = ['redacted' => true];
-        }
-
-        return $payload;
+        return 'ORD-'.now()->format('Ymd').'-'.strtoupper(Str::random(8));
     }
 }

@@ -3,119 +3,141 @@
 namespace App\Services;
 
 use App\Models\Payment;
+use App\Support\Payload;
+use App\Support\Secret;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
- * Talks to the Vitas core (web-abacus) "CustomerDataInquiry" endpoint that
- * returns the outstanding installment for a loan number. This is the same
- * endpoint + credentials the legacy ZainCash flow uses.
+ * Vitas Core Banking (web-abacus):
+ *   - CustomerDataInquiryByLoanNumber: outstanding installment for a loan number
+ *   - CustomerPaymentDetails:          settle a paid installment in the core
+ * Every call is appended to api_logs.
  */
 class VitasCoreClient
 {
+    const SERVICE = 'core_banking';
+
+    public function __construct(private ApiLogger $logger)
+    {
+    }
+
     /**
-     * @return array|null  Decoded inquiry payload, or null when the call fails
-     *                      or the response is not a usable object.
+     * @return array{found: bool, data: ?array, message: ?string}
+     *   data (normalized): loan_number, customer_name, phone_number, branch_name, branch_code,
+     *   loan_product, due_date, amount_iqd, client_id, installment_number, raw
      */
-    public function customerDataInquiry(string $loanNumber): ?array
+    public function inquiry(string $loanNumber): array
     {
         $cfg = config('services.vitas_core');
 
-        try {
-            $response = Http::asForm()
-                ->timeout(30)
-                ->post($cfg['inquiry_url'], [
-                    'loanNumber' => $loanNumber,
-                    'username'   => $cfg['username'],
-                    'password'   => $cfg['password'],
-                ]);
-        } catch (\Throwable $e) {
-            Log::channel('payments')->error('vitas_core.inquiry.transport_error', [
-                'loan' => $loanNumber,
-                'error' => $e->getMessage(),
-            ]);
+        $result = $this->logger->send($this->request(), self::SERVICE, 'inquiry', 'POST', $this->url($cfg['inquiry_path']), [
+            'json' => [
+                'LoanNumber' => $loanNumber,
+                'username'   => $cfg['inquiry_username'],
+                'password'   => Secret::reveal($cfg['inquiry_password']),
+            ],
+        ]);
 
+        $json = $result['response'] ? $result['response']->json() : null;
+        if (!is_array($json) || $result['response']->failed()) {
+            return ['found' => false, 'data' => null, 'message' => $result['error'] ?: 'core banking unavailable', 'unavailable' => true];
+        }
+
+        // Core convention: StatusCode 0 = OK, anything else carries an ActionStatus message
+        $statusCode = Payload::find($json, ['StatusCode']);
+        if ($statusCode !== null && (int) $statusCode !== 0) {
+            return ['found' => false, 'data' => null, 'message' => Payload::find($json, ['ActionStatus', 'Message']) ?: 'loan not found'];
+        }
+
+        $data = $this->normalizeInquiry($json, $loanNumber);
+        if ($data['amount_iqd'] <= 0) {
+            return ['found' => false, 'data' => $data, 'message' => 'no amount due'];
+        }
+
+        return ['found' => true, 'data' => $data, 'message' => null];
+    }
+
+    /**
+     * Push a paid installment to the core.
+     *
+     * @return array{ok: bool, http_status: ?int, status_code: ?string, action_status: ?string, body: mixed}
+     */
+    public function pushPayment(Payment $payment): array
+    {
+        $cfg = config('services.vitas_core');
+
+        $result = $this->logger->send($this->request(), self::SERVICE, 'payment_push', 'POST', $this->url($cfg['payment_path']), [
+            'json' => [
+                'LoanNumber'       => (string) $payment->loan_number,
+                'DueAmount'        => number_format((float) $payment->amount, 2, '.', ''),
+                'PaidAmount'       => number_format((float) $payment->amount, 2, '.', ''),
+                'TransxsID'        => (string) ($payment->areeba_transaction_id ?: $payment->reference),
+                'PaymentDate'      => ($payment->paid_at ?: now())->format('Y-m-d\TH:i:s'),
+                'username'         => $cfg['payment_username'],
+                'password'         => Secret::reveal($cfg['payment_password']),
+                'SourceCurrencyID' => (int) $cfg['source_currency_id'],
+                'UserId'           => '',
+            ],
+        ], $payment->id);
+
+        $response = $result['response'];
+        $json = $response ? $response->json() : null;
+        $statusCode = is_array($json) ? Payload::find($json, ['StatusCode']) : null;
+        $actionStatus = is_array($json) ? Payload::find($json, ['ActionStatus', 'Message']) : null;
+
+        // Success = HTTP 2xx and StatusCode 0 (or absent)
+        $ok = $response && $response->successful() && ($statusCode === null || (int) $statusCode === 0);
+
+        return [
+            'ok'            => $ok,
+            'http_status'   => $response ? $response->status() : null,
+            'status_code'   => $statusCode !== null ? (string) $statusCode : null,
+            'action_status' => $actionStatus !== null ? (string) $actionStatus : $result['error'],
+            'body'          => $json ?? ($response ? $response->body() : null),
+        ];
+    }
+
+    private function normalizeInquiry(array $json, string $loanNumber): array
+    {
+        $amount = Payload::find($json, ['TotalPaymentDueIQD', 'PaymentDueIQD', 'DueAmountIQD', 'TotalDueAmount', 'DueAmount', 'AmountDue']);
+        $dueDate = Payload::find($json, ['DueDate', 'PaymentDueDate', 'NextDueDate', 'InstallmentDueDate']);
+
+        return [
+            'loan_number'        => (string) (Payload::find($json, ['LoanNumber']) ?: $loanNumber),
+            'customer_name'      => Payload::find($json, ['CustomerName', 'ClientName', 'BorrowerName', 'FullName', 'Name']),
+            'phone_number'       => Payload::find($json, ['PhoneNumber', 'MobileNumber', 'Mobile', 'Phone']),
+            'branch_name'        => Payload::find($json, ['BranchName', 'Branch']),
+            'branch_code'        => Payload::find($json, ['BranchCode', 'BranchID']),
+            'loan_product'       => Payload::find($json, ['LoanProduct', 'LoanProductName', 'ProductName', 'Product']),
+            'due_date'           => $this->parseDate($dueDate),
+            'amount_iqd'         => round((float) str_replace(',', '', (string) $amount), 2),
+            'client_id'          => Payload::find($json, ['ClientID', 'ClientId', 'CustomerID']),
+            'installment_number' => Payload::find($json, ['PaymentNumber', 'InstallmentNumber']),
+            'raw'                => $json,
+        ];
+    }
+
+    private function parseDate($value): ?string
+    {
+        if (!$value) {
             return null;
         }
-
-        $data = $response->json();
-
-        Log::channel('payments')->info('vitas_core.inquiry.response', [
-            'loan'   => $loanNumber,
-            'status' => $response->status(),
-            'ok'     => is_array($data),
-        ]);
-
-        return is_array($data) ? $data : null;
-    }
-
-    /**
-     * True when the inquiry payload actually carries a payable installment.
-     */
-    public function hasPayableInstallment(?array $inquiry): bool
-    {
-        if (!$inquiry) {
-            return false;
-        }
-
-        $usd = (float) ($inquiry['TotalPaymentDueUSD'] ?? $inquiry['PaymentDueUSD'] ?? 0);
-        $iqd = (float) ($inquiry['TotalPaymentDueIQD'] ?? $inquiry['PaymentDueIQD'] ?? 0);
-
-        return ($usd > 0 || $iqd > 0) && !empty($inquiry['LoanNumber']);
-    }
-
-    /**
-     * Post a settled installment back to the Vitas core so the loan system marks
-     * it paid — the Areeba equivalent of the legacy ZainCash
-     * CustomerPaymentDetails call. Returns true on a confirmed success.
-     */
-    public function confirmPayment(Payment $payment): bool
-    {
-        $cfg = config('services.vitas_core');
-
-        if (!($cfg['confirm_enabled'] ?? true)) {
-            Log::channel('payments')->info('vitas_core.confirm.disabled', ['reference' => $payment->reference]);
-
-            return false;
-        }
-
-        $body = [
-            'LoanNumber'    => (int) $payment->loan_number,
-            'DueAmount'     => $payment->amount_usd ?? $payment->amount,
-            'PaidAmount'    => $payment->amount_usd ?? $payment->amount,
-            'TransxsID'     => $payment->id,
-            'Reference'     => $payment->reference,
-            'GatewayRef'    => $payment->gateway_uuid,
-            'PaymentMethod' => 'Areeba',
-            'Channel'       => $payment->channel,
-            'PaymentDate'   => optional($payment->paid_at ?? $payment->created_at)->format('Y-m-d H:i:s'),
-            'username'      => $cfg['confirm_username'] ?? $cfg['username'],
-            'password'      => $cfg['confirm_password'] ?? $cfg['password'],
-        ];
-
         try {
-            $response = Http::asForm()->timeout(30)->post($cfg['confirm_url'], $body);
-        } catch (\Throwable $e) {
-            Log::channel('payments')->error('vitas_core.confirm.transport_error', [
-                'reference' => $payment->reference,
-                'error'     => $e->getMessage(),
-            ]);
-
-            return false;
+            return Carbon::parse($value)->toDateString();
+        } catch (Throwable $e) {
+            return null;
         }
+    }
 
-        $json = $response->json();
-        // Success = HTTP 2xx AND (no StatusCode field, or StatusCode == 0).
-        $ok = $response->successful()
-            && (!is_array($json) || !array_key_exists('StatusCode', $json) || (int) $json['StatusCode'] === 0);
+    private function request()
+    {
+        return Http::acceptJson()->timeout((int) config('services.vitas_core.timeout', 30))->connectTimeout(10);
+    }
 
-        Log::channel('payments')->info('vitas_core.confirm.response', [
-            'reference' => $payment->reference,
-            'status'    => $response->status(),
-            'ok'        => $ok,
-            'body'      => is_array($json) ? $json : (string) $response->body(),
-        ]);
-
-        return $ok;
+    private function url(string $path): string
+    {
+        return rtrim(config('services.vitas_core.base_url'), '/').'/'.ltrim($path, '/');
     }
 }

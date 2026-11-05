@@ -19,6 +19,8 @@ class VerifyCsrfToken extends Middleware
      * @var array
      */
     protected $except = [
-        //
+        // Areeba posts these from its own servers / hosted checkout page
+        'payment/return',
+        'payment/webhook',
     ];
 }

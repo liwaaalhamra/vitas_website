@@ -41,7 +41,10 @@ Route::group(['prefix' => 'admin'], function () {
 		Route::post('/import-loyalty-points', 'Voyager\ImportLoyaltyPointController@import')->name('import.loyalty');
 
 		Route::get('/payments', 'Voyager\PaymentsAdminController@index')->name('admin.payments.index');
+		Route::post('/payments/repush-failed', 'Voyager\PaymentsAdminController@repushFailed')->name('admin.payments.repush-failed');
 		Route::get('/payments/{payment}', 'Voyager\PaymentsAdminController@show')->name('admin.payments.show');
+		Route::post('/payments/{payment}/repush', 'Voyager\PaymentsAdminController@repush')->name('admin.payments.repush');
+		Route::post('/payments/{payment}/verify', 'Voyager\PaymentsAdminController@verify')->name('admin.payments.verify');
 	});
 });
 
@@ -124,11 +127,15 @@ Route::group(['middleware' => ['locale', 'website'], 'prefix' => '{locale}'], fu
 	/*
 	|--------------------------------------------------------------------------
 	| Areeba payment (pay a loan installment by loan number)
+	| Gateway return / webhook have no locale prefix, see the end of this file
 	|--------------------------------------------------------------------------
 	*/
-	Route::get('/pay/loan', 'PaymentController@showLoanForm')->name('pay.loan.form');
-	Route::post('/pay/loan', 'PaymentController@lookupAndInitiate')->name('pay.loan.init');
-	Route::get('/pay/result', 'PaymentController@paymentReturn')->name('pay.result');
+	Route::get('/payment', 'PaymentController@index')->name('payment.index');
+	Route::post('/payment/inquiry', 'PaymentController@inquiry')->middleware('throttle:payment-inquiry')->name('payment.inquiry');
+	Route::post('/payment/checkout', 'PaymentController@checkout')->middleware('throttle:payment-checkout')->name('payment.checkout');
+	Route::get('/payment/result/{reference}', 'PaymentController@result')->middleware('signed')->name('payment.result');
+	Route::get('/payment/receipt/{reference}', 'PaymentController@receipt')->middleware('signed')->name('payment.receipt');
+	Route::get('/pay/loan', 'PaymentController@legacyForm');
 
 });
 
@@ -147,3 +154,10 @@ Route::post('/app-check-eligibility/{lang}', 'CheckEligibilityController@checkLo
 
 Route::get('/how-to-collect/{lang}', 'HowToCollect@webview');
 
+/*
+|--------------------------------------------------------------------------
+| Areeba gateway callbacks (no locale prefix, CSRF exempt)
+|--------------------------------------------------------------------------
+*/
+Route::match(['get', 'post'], '/payment/return', 'PaymentReturnController@return')->middleware('throttle:payment-webhook')->name('payment.return');
+Route::post('/payment/webhook', 'PaymentReturnController@webhook')->middleware('throttle:payment-webhook')->name('payment.webhook');

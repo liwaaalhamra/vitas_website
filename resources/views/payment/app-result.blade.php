@@ -3,16 +3,12 @@
     $locale = app()->getLocale();
     $ar = $locale === 'ar';
     $map = [
-        'paid'      => [$ar ? 'تم الدفع بنجاح' : 'Payment successful', '#137333', '✓'],
-        'pending'   => [$ar ? 'الدفع قيد المعالجة' : 'Payment is processing', '#8a6d00', '…'],
-        'redirected'=> [$ar ? 'الدفع قيد المعالجة' : 'Payment is processing', '#8a6d00', '…'],
-        'failed'    => [$ar ? 'فشلت عملية الدفع' : 'Payment failed', '#c5221f', '✕'],
-        'declined'  => [$ar ? 'تم رفض البطاقة' : 'Card declined', '#c5221f', '✕'],
-        'cancelled' => [$ar ? 'تم إلغاء الدفع' : 'Payment cancelled', '#5f6368', '✕'],
-        'expired'   => [$ar ? 'انتهت صلاحية الجلسة' : 'Payment session expired', '#c5221f', '✕'],
-        'mismatch'  => [$ar ? 'تعذّر التحقق من الدفع' : 'Payment could not be verified', '#c5221f', '!'],
-        'error'     => [$ar ? 'حدث خطأ' : 'Something went wrong', '#c5221f', '!'],
-        'unknown'   => [$ar ? 'حالة غير معروفة' : 'Unknown status', '#5f6368', '?'],
+        'paid'            => [$ar ? 'تم الدفع بنجاح' : 'Payment successful', '#137333', '✓'],
+        'initiated'       => [$ar ? 'الدفع قيد المعالجة' : 'Payment is processing', '#8a6d00', '…'],
+        'session_created' => [$ar ? 'الدفع قيد المعالجة' : 'Payment is processing', '#8a6d00', '…'],
+        'failed'          => [$ar ? 'فشلت عملية الدفع' : 'Payment failed', '#c5221f', '✕'],
+        'cancelled'       => [$ar ? 'تم إلغاء الدفع' : 'Payment cancelled', '#5f6368', '✕'],
+        'unknown'         => [$ar ? 'حالة غير معروفة' : 'Unknown status', '#5f6368', '?'],
     ];
     [$label, $color, $icon] = $map[$status] ?? $map['unknown'];
 @endphp
@@ -42,11 +38,14 @@
             <div class="badge" style="background:{{ $color }}">{{ $icon }}</div>
             <h1>{{ $label }}</h1>
             @if($payment)
-                <p>{{ number_format((float) $payment->amount, 2) }} {{ $payment->currency }}</p>
+                <p>{{ number_format((float) $payment->amount, 0) }} {{ $payment->currency }}</p>
                 @if($payment->loan_number)
                     <p>{{ $ar ? 'رقم القرض' : 'Loan' }}: {{ $payment->loan_number }}</p>
                 @endif
                 <p class="ref">{{ $payment->reference }}</p>
+                @if($status === 'paid')
+                    <p><a href="{{ \App\Http\Controllers\PaymentController::receiptUrl($payment) }}">{{ $ar ? 'عرض الإيصال' : 'View receipt' }}</a></p>
+                @endif
             @endif
         </div>
     </div>

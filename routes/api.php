@@ -123,11 +123,10 @@ Route::get('zain-cash-status', 'Api\VitasController@zain_cash_status')->name('za
 
 /*
 |--------------------------------------------------------------------------
-| Areeba gateway – server-to-server + browser return (no locale header)
+| Areeba gateway – payment status poll for the app (no locale header)
 |--------------------------------------------------------------------------
 */
-Route::match(['get', 'post'], 'areeba/callback', 'Api\AreebaPaymentController@callback')->name('areeba.callback');
-Route::get('areeba/return', 'Api\AreebaPaymentController@paymentReturn')->name('areeba.return');
+// Gateway return + webhook are shared with the website: /payment/return, /payment/webhook
 Route::get('areeba/status/{reference}', 'Api\AreebaPaymentController@status')->name('areeba.status');
 
 

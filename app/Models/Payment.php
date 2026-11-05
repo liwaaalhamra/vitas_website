@@ -5,38 +5,52 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * A single payment attempt against an external gateway (currently Areeba).
+ * A single payment attempt through the Areeba hosted checkout.
  *
- * These two tables (payments + payment_events) are the system of record for
- * gateway payments. Nothing is posted back to the Vitas core.
+ * Status lifecycle:   initiated -> session_created -> paid | failed | cancelled
+ * Banking push:       null (not paid) -> pending -> success | failed
  *
- * @property string $reference
- * @property string $channel   app|web
- * @property string $status    pending|redirected|paid|failed|declined|cancelled|expired|error|mismatch
+ * Every step is in payment_events, every outbound HTTP call in api_logs.
+ *
+ * @property string $reference   our order reference, sent to Areeba as "pt"
+ * @property string $channel     app|web
+ * @property string $status
  */
 class Payment extends Model
 {
-    /** Non terminal statuses that a status sync is still allowed to move forward. */
-    public const OPEN_STATUSES = ['pending', 'redirected'];
+    public const OPEN_STATUSES = ['initiated', 'session_created'];
 
-    /** Statuses that are final and must never be overwritten by a later sync. */
-    public const TERMINAL_STATUSES = ['paid', 'failed', 'declined', 'cancelled', 'expired', 'error', 'mismatch'];
+    public const TERMINAL_STATUSES = ['paid', 'failed', 'cancelled'];
+
+    public const PUSH_PENDING = 'pending';
+    public const PUSH_SUCCESS = 'success';
+    public const PUSH_FAILED = 'failed';
 
     protected $guarded = [];
 
     protected $casts = [
-        'meta'          => 'array',
-        'paid_at'       => 'datetime',
-        'confirmed_at'  => 'datetime',
-        'amount'        => 'decimal:2',
-        'amount_usd'    => 'decimal:2',
-        'amount_iqd'    => 'decimal:2',
-        'exchange_rate' => 'decimal:4',
+        'meta'                    => 'array',
+        'areeba_response_json'    => 'array',
+        'banking_response_json'   => 'array',
+        'paid_at'                 => 'datetime',
+        'confirmed_at'            => 'datetime',
+        'banking_pushed_at'       => 'datetime',
+        'banking_last_attempt_at' => 'datetime',
+        'due_date'                => 'date',
+        'amount'                  => 'decimal:2',
+        'amount_usd'              => 'decimal:2',
+        'amount_iqd'              => 'decimal:2',
+        'exchange_rate'           => 'decimal:4',
     ];
 
     public function events()
     {
         return $this->hasMany(PaymentEvent::class);
+    }
+
+    public function apiLogs()
+    {
+        return $this->hasMany(ApiLog::class);
     }
 
     public function isPaid(): bool
@@ -50,13 +64,16 @@ class Payment extends Model
     }
 
     /**
-     * Move the payment to a new status. Terminal statuses are sticky: once the
-     * payment is settled we never let a duplicate callback / reconcile pass
-     * drag it back.
+     * Move to a new status. Terminal statuses are sticky, with one exception:
+     * a gateway-verified "paid" overrides failed / cancelled, because money
+     * actually taken must never be lost behind an earlier customer cancel.
      */
     public function markStatus(string $status, ?string $reason = null): bool
     {
-        if ($this->isTerminal() && $status !== $this->status) {
+        if ($this->isPaid() && $status !== 'paid') {
+            return false;
+        }
+        if ($this->isTerminal() && $status !== 'paid' && $status !== $this->status) {
             return false;
         }
 
@@ -65,11 +82,21 @@ class Payment extends Model
 
         if ($status === 'paid' && $this->paid_at === null) {
             $this->paid_at = now();
+            $this->banking_push_status = $this->banking_push_status ?: self::PUSH_PENDING;
         }
 
         $this->save();
 
         return true;
+    }
+
+    /** Merge one stage ("session", "transaction", "webhook", "return") into areeba_response_json. */
+    public function storeAreebaResponse(string $stage, $response): void
+    {
+        $stored = $this->areeba_response_json ?? [];
+        $stored[$stage] = $response;
+        $this->areeba_response_json = $stored;
+        $this->save();
     }
 
     /**
@@ -86,26 +113,25 @@ class Payment extends Model
         ]);
     }
 
-    /**
-     * Payments that started but never reached a terminal state and are old
-     * enough to be worth re-querying (but not ancient).
-     */
+    /** Open payments old enough to re-check with the gateway (but not ancient). */
     public function scopeStale($query)
     {
         return $query->whereIn('status', self::OPEN_STATUSES)
             ->where('created_at', '<=', now()->subMinutes(15))
-            ->where('created_at', '>=', now()->subDays(3));
+            ->where('created_at', '>=', now()->subDays(7));
     }
 
-    /**
-     * Paid payments whose confirmation to the Vitas core has not gone through
-     * yet (and is still worth retrying).
-     */
-    public function scopeNeedingCoreConfirmation($query)
+    /** Paid payments the core banking has not acknowledged yet and are still retried automatically. */
+    public function scopeNeedingBankingPush($query)
     {
         return $query->where('status', 'paid')
-            ->whereNull('confirmed_at')
-            ->where('confirm_attempts', '<', 10)
+            ->whereIn('banking_push_status', [self::PUSH_PENDING, self::PUSH_FAILED])
+            ->where('banking_push_attempts', '<', (int) config('services.vitas_core.push_max_attempts', 10))
             ->where('paid_at', '>=', now()->subDays(7));
+    }
+
+    public function getBorrowerNameMaskedAttribute(): ?string
+    {
+        return \App\Support\Mask::name($this->customer_name);
     }
 }

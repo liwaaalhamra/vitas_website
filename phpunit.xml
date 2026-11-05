@@ -33,11 +33,20 @@
         <server name="MAIL_DRIVER" value="array"/>
         <server name="QUEUE_CONNECTION" value="sync"/>
         <server name="SESSION_DRIVER" value="array"/>
-        <server name="AREEBA_BASE_URL" value="https://gateway.test/api/v3"/>
-        <server name="AREEBA_API_KEY" value="testkey"/>
-        <server name="AREEBA_API_USERNAME" value="apiuser"/>
+        <server name="AREEBA_BASE_URL" value="https://areeba.test"/>
+        <server name="AREEBA_ENV_PATH" value="prod"/>
+        <server name="AREEBA_CLIENT_ID" value="2503"/>
+        <server name="AREEBA_PRODUCT_ID" value="93000533"/>
+        <server name="AREEBA_API_USERNAME" value="Vitas PGW"/>
+        <server name="AREEBA_RETURN_URL_PARAM" value=""/>
         <server name="AREEBA_API_PASSWORD" value="apipass"/>
+        <server name="AREEBA_SUBSCRIPTION_KEY" value="subkey"/>
+        <server name="AREEBA_WEBHOOK_SECRET" value="whsecret"/>
         <server name="AREEBA_LOYALTY_POINTS" value="150"/>
-        <server name="VITAS_PAYMENTS_INQUIRY_URL" value="https://core.test/CustomerDataInquiry"/>
+        <server name="CORE_BANKING_API_BASE_URL" value="https://core.test"/>
+        <server name="CORE_BANKING_INQUIRY_USERNAME" value="inq"/>
+        <server name="CORE_BANKING_INQUIRY_PASSWORD" value="inqpass"/>
+        <server name="CORE_BANKING_PAYMENT_USERNAME" value="pay"/>
+        <server name="CORE_BANKING_PAYMENT_PASSWORD" value="paypass"/>
     </php>
 </phpunit>
