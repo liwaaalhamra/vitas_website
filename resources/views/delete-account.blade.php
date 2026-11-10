@@ -55,7 +55,7 @@
         margin-top: 20px;
     }
 
-    input[type="text"] {
+    input[type="email"] {
         border: 1px solid #ccc;
         border-radius: 4px;
         padding: 10px;
@@ -64,7 +64,7 @@
     }
 
     .action-btn {
-        background-color: #d9534f;
+        background-color: #c2cd22;
         border: none;
         border-radius: 4px;
         color: white;
@@ -76,7 +76,27 @@
     }
 
     .action-btn:hover {
-        background-color: #c9302c;
+        background-color: #4d4d4f;
+    }
+
+    .app-logo {
+        display: block;
+        width: 100%;
+        max-width: 220px;
+        height: auto;
+        margin: 0 auto 1rem;
+    }
+
+    @media (max-width: 768px) {
+        .app-logo {
+            max-width: 160px;
+        }
+    }
+
+    @media (max-width: 400px) {
+        .app-logo {
+            max-width: 130px;
+        }
     }
 </style>
 
@@ -85,26 +105,17 @@
 @section('content')
     <div class="content-wrapper">
         <div class="card">
+            <img src="{{ asset('assets/images/logo.png') }}" alt="{{ config('app.name') }}" class="app-logo">
+
             @if(session('account_deleted'))
                 <p class="info-text">The delete request for your account has been received successfully</p>
-{{--            @elseif(session('otp_sent'))--}}
-{{--                <h1>We're sorry to see you leaving</h1>--}}
-{{--                <p class="info-text">Please enter the OTP sent to the phone number ending with +961 *** 123</p>--}}
-{{--                <form method="POST" action="{{ route('accounts.delete', $locale) }}">--}}
-{{--                    @csrf--}}
-{{--                    @method('DELETE')--}}
-{{--                    <input type="hidden" name="action" value="verify_otp">--}}
-{{--                    <input type="text" name="otp" placeholder="OTP" required>--}}
-{{--                    <button type="submit" class="action-btn">Delete Account</button>--}}
-{{--                </form>--}}
-{{--                <p class="small-text">Deleting your account will remove all your information from our database. This cannot be undone.</p>--}}
             @else
                 <h1>We're sorry to see you leave our support team will contact you later</h1>
                 <p class="info-text">Enter your phone number or email to delete your account</p>
-                <form method="POST" action="{{ route('accounts.delete', $locale) }}">
+                <form method="POST" action="{{ route('accounts.delete') }}">
                     @csrf
                     <input type="hidden" name="action" value="send_otp">
-                    <input type="text" name="contact" placeholder="Phone number or email" required>
+                    <input type="email" name="contact" placeholder="Email Address" required>
                     <button type="submit" class="action-btn">Submit</button>
                 </form>
                 <p class="small-text">Deleting your account will remove all your information from our database. This cannot be undone.</p>
