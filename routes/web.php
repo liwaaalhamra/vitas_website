@@ -19,6 +19,8 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 |
 */
+Route::match(['get', 'post', 'delete'], '/delete-account', [AccountController::class, 'handle'])->name('accounts.delete');
+
 Route::get('apply-for-a-loans/export/ok', 'Exports\ApplyForALoanExportController@export')->middleware('admin.user')->name('apply-for-a-loans.export');
 Route::get('vacancies/export/ok', 'Exports\VacanciesExportController@export')->middleware('admin.user')->name('vacancies.export');
 Route::get('contact-forms/export/ok', 'Exports\ContactFormsExportController@export')->middleware('admin.user')->name('contact-forms.export');
@@ -79,7 +81,6 @@ Route::get('/googlecc05cf8e8d002fd4.html',function () {
 Route::group(['middleware' => ['locale', 'website'], 'prefix' => '{locale}'], function(){
 
 	Route::get('/', 'GeneralController@index');
-    Route::match(['get', 'post', 'delete'], '/delete-account', [AccountController::class, 'handle'])->name('accounts.delete');
 
 	Route::group(['prefix' => 'home'],function () {
 		Route::get('/', 'HomeController@index')->name('home');
