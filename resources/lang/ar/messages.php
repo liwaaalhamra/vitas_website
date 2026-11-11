@@ -13,5 +13,7 @@ return [
     'pending_redeemed'     => 'في انتظار طلب استرداد سابق',
     'invalid_access_token'     => 'تصريح الدخول غير صالح',
     'authentication_missing'     => 'فقدان الشهادة',
+    'invalid_email'     => 'البريد الإلكتروني غير صالح',
+    'delete_account_request_received'     => 'تلقينا طلبك لحذف حسابك. سيقوم فريقنا بمراجعته والتواصل معك قريباً.',
     'IQD' => 'د' . '.' . 'ع'
 ];

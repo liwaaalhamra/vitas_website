@@ -12,5 +12,7 @@ return [
     'pending_redeemed'     => 'Pending previous redeem request',
     'invalid_access_token'     => 'Invalid Access Token',
     'authentication_missing'     => 'Athentication Missing',
+    'invalid_email'     => 'Invalid email address',
+    'delete_account_request_received'     => 'We received your request to delete your account. Our team will check it and get back to you soon.',
     'IQD' => 'IQD'
 ];

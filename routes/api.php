@@ -51,6 +51,7 @@ Route::group(['middleware' => 'locale', 'namespace' => 'Api'], function () {
 	Route::post('/refer-a-friend', 'ReferFriendController@index');
 	Route::post('/write-my-story', 'WriteStoryController@index');
 	Route::post('/contact-us', 'ContactController@index');
+	Route::post('/delete-account', 'DeleteAccountController@index')->middleware('throttle:6,1');
     Route::get('/governorates', 'GovernorateController@index');
     Route::get('/banners', 'BannerController@index');
     Route::get('/redeemable-items', 'RedeemableItemController@index');
