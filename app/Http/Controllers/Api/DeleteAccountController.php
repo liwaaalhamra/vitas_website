@@ -15,14 +15,6 @@ class DeleteAccountController extends Controller
 	*/
 	public function index(Request $request)
 	{
-		if(empty(request('email'))){
-			return parent::return_error("Missing email", 401, 'messages.missing_parameter');
-		}
-
-		if(!filter_var(request('email'), FILTER_VALIDATE_EMAIL)){
-			return parent::return_error("Invalid email", 401, 'messages.invalid_email');
-		}
-
         return parent::return_json(['message' => trans('messages.delete_account_request_received')]);
 	}
 }
